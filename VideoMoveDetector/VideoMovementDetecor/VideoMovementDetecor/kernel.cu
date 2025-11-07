@@ -1,5 +1,4 @@
-﻿#include <mpi.h>
-#include "cuda_runtime.h"
+﻿#include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
 // Nagłówki OpenCV
@@ -7,17 +6,21 @@
 #include <opencv2/videoio.hpp>    
 #include <opencv2/highgui.hpp>    
 #include <opencv2/imgproc.hpp>    
-#include <opencv2/core/utility.hpp> // Dla cv::TickMeter
+#include <opencv2/core/utility.hpp> 
 
-// Nagłówek OpenMP
-#include <omp.h>
-
+// Nagłówki systemowe
 #include <stdio.h>
 #include <iostream>
-#include <string> // Dla std::to_string
+#include <string> 
+#include <vector> // Potrzebne do listy plików
+
+// Nagłówek MPI
+#include <mpi.h>
 
 // ======================================================================
-// KERNEL CUDA (bez zmian)
+// OBA KERNELE CUDA (diffAndThresholdKernel i erosionKernel)
+// POZOSTAJĄ BEZ ZMIAN - (nie wklejam ich tu ponownie dla zwięzłości,
+// ale upewnij się, że są w Twoim pliku - po prostu je zostaw)
 // ======================================================================
 
 __global__ void diffAndThresholdKernel(unsigned char* mask,
@@ -37,36 +40,32 @@ __global__ void diffAndThresholdKernel(unsigned char* mask,
     }
 }
 
-// ======================================================================
-// FUNKCJA OpenMP (bez zmian)
-// ======================================================================
-
-void manualErosionOpenMP(const cv::Mat& src, cv::Mat& dst)
+__global__ void erosionKernel(unsigned char* dstMask,
+    const unsigned char* srcMask,
+    int width, int height)
 {
-    dst.create(src.size(), src.type());
-    int rows = src.rows;
-    int cols = src.cols;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-#pragma omp parallel for collapse(2)
-    for (int y = 1; y < rows - 1; ++y)
+    if (x > 0 && x < width - 1 && y > 0 && y < height - 1)
     {
-        for (int x = 1; x < cols - 1; ++x)
+        unsigned char minVal = 255;
+        for (int ky = -1; ky <= 1; ++ky)
         {
-            unsigned char minVal = 255;
-            for (int ky = -1; ky <= 1; ++ky)
+            for (int kx = -1; kx <= 1; ++kx)
             {
-                for (int kx = -1; kx <= 1; ++kx)
-                {
-                    unsigned char val = src.at<unsigned char>(y + ky, x + kx);
-                    if (val < minVal) {
-                        minVal = val;
-                    }
+                int neighborIdx = (y + ky) * width + (x + kx);
+                unsigned char val = srcMask[neighborIdx];
+                if (val < minVal) {
+                    minVal = val;
                 }
             }
-            dst.at<unsigned char>(y, x) = minVal;
         }
+        int centerIdx = y * width + x;
+        dstMask[centerIdx] = minVal;
     }
 }
+
 
 // Funkcja pomocnicza do sprawdzania błędów CUDA
 void checkCudaError(cudaError_t status, const char* msg)
@@ -74,65 +73,96 @@ void checkCudaError(cudaError_t status, const char* msg)
     if (status != cudaSuccess) {
         fprintf(stderr, "Blad CUDA: %s: %s\n", msg, cudaGetErrorString(status));
         cudaDeviceReset();
-        exit(EXIT_FAILURE);
+        // W MPI lepiej nie robić exit(), tylko zakończyć program
+        MPI_Abort(MPI_COMM_WORLD, status);
     }
 }
 
 // ======================================================================
-// GŁÓWNA FUNKCJA PROGRAMU (ZMIANY)
+// GŁÓWNA FUNKCJA PROGRAMU (ZMIANY MPI)
 // ======================================================================
 
-int main()
+// ZMIANA: main musi teraz przyjmować argumenty dla MPI
+int main(int argc, char* argv[])
 {
-    const int MOTION_THRESHOLD = 25;
+    // === 1. INICJALIZACJA MPI ===
+    int world_rank; // ID tego procesu (np. 0, 1, 2...)
+    int world_size; // Całkowita liczba procesów (ile kopii uruchomiliśmy)
 
-    // --- Ustawienie rozdzielczości (DO TESTÓW FPS) ---
-    // Domyślne to zazwyczaj 640x480. Możesz spróbować zmienić na 1280x720.
+    MPI_Init(&argc, &argv); // Inicjujemy MPI
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank); // Pobieramy nasze ID
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size); // Pobieramy łączną liczbę procesów
 
+    // === 2. LISTA ZADAŃ (PLIKI WIDEO) ===
+    // Każdy proces musi znać całą listę.
+    // Upewnij się, że masz te pliki i ścieżki są poprawne!
+    std::vector<std::string> videoFiles = {
+        "C:\\Users\\mnosel\\Downloads\\test0.mp4",
+        "C:\\Users\\mnosel\\Downloads\\test1.mp4",
+        "C:\\Users\\mnosel\\Downloads\\test2.mp4",
+        "C:\\Users\\mnosel\\Downloads\\test3.mp4",
+        // Możesz dodać więcej filmów, jeśli chcesz
+    };
 
-    cv::VideoCapture cap("C:\\Users\\mnosel\\Downloads\\test.mp4");
-    if (!cap.isOpened())
-    {
-        std::cerr << "BLAD: Nie mozna otworzyc kamery internetowej!" << std::endl;
-        std::cin.get();
+    if (videoFiles.empty()) {
+        if (world_rank == 0) { // Tylko proces 0 (główny) wypisze błąd
+            std::cerr << "BLAD: Lista plikow wideo jest pusta!" << std::endl;
+        }
+        MPI_Finalize();
         return -1;
     }
 
-    // Ustawienie żądanej rozdzielczości kamery
-    
+    // === 3. ROZDZIAŁ PRACY (Logika MPI) ===
+    // Używamy naszego 'rank' (ID), aby wybrać plik wideo.
+    // Operator modulo (%) zapewnia, że zadania zostaną rozdzielone,
+    // nawet jeśli mamy więcej procesów niż filmów.
+    std::string myVideoFile = videoFiles[world_rank % videoFiles.size()];
 
-    std::cout << "Otwarto kamere. Rozpoczynanie przetwarzania..." << std::endl;
-    std::cout << "Nacisnij 'ESC', aby zakonczyc." << std::endl;
-    std::cout << "Nacisnij 's', aby zapisac klatki." << std::endl;
+    // Tworzymy unikalny tytuł okna dla każdego procesu
+    std::string windowTitle = "Proces " + std::to_string(world_rank);
+
+    std::cout << "[Proces " << world_rank << "/" << world_size << "] Rozpoczynam przetwarzanie: " << myVideoFile << std::endl;
+
+    // ===============================================================
+    // Reszta kodu jest identyczna jak poprzednio,
+    // tylko używa zmiennej 'myVideoFile' zamiast stałej ścieżki
+    // ===============================================================
+
+    const int MOTION_THRESHOLD = 25;
+
+    cv::VideoCapture cap(myVideoFile); // <-- ZMIANA: Używamy pliku przypisanego przez MPI
+
+    if (!cap.isOpened())
+    {
+        std::cerr << "[Proces " << world_rank << "] BLAD: Nie mozna otworzyc pliku: " << myVideoFile << std::endl;
+        MPI_Finalize(); // Zakończ MPI przed wyjściem
+        return -1;
+    }
 
     cv::Mat frame;
     cv::Mat grayFrame;
     cv::Mat motionMaskGPU;
-    cv::Mat motionMaskOMP;
 
-    unsigned char* d_current = nullptr;
-    unsigned char* d_prev = nullptr;
-    unsigned char* d_mask = nullptr;
+    unsigned char* d_current = nullptr, * d_prev = nullptr;
+    unsigned char* d_mask_raw = nullptr, * d_mask_eroded = nullptr;
 
     int width, height;
     size_t dataSize = 0;
     bool isFirstFrame = true;
 
-    // --- NOWOŚĆ: Pomiar FPS ---
-    cv::TickMeter tm; // Obiekt do mierzenia czasu
-    int frameCounter = 0; // Licznik klatek do zapisu
+    cv::TickMeter tm;
+    int frameCounter = 0;
 
     while (true)
     {
-        tm.start(); // <-- Rozpocznij pomiar czasu
+        tm.start();
+
         cap.read(frame);
         if (frame.empty()) {
-            std::cout << "Koniec pliku wideo. Zapetlanie..." << std::endl;
-            // Przewiń wideo z powrotem na klatkę 0
+            // std::cout << "[Proces " << world_rank << "] Koniec pliku, zapetlanie." << std::endl;
             cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-            // Zresetuj 'isFirstFrame', aby poprawnie załadować bufor 'd_prev'
             isFirstFrame = true;
-            continue; // Przejdź do następnej iteracji (wczyta nową klatkę 0)
+            continue;
         }
 
         cv::cvtColor(frame, grayFrame, cv::COLOR_BGR2GRAY);
@@ -141,91 +171,74 @@ int main()
         {
             width = grayFrame.cols;
             height = grayFrame.rows;
-            // Sprawdź, czy kamera faktycznie ustawiła żądaną rozdzielczość
-            std::cout << "Rozdzielczosc przetwarzania: " << width << "x" << height << std::endl;
-
+            // std::cout << "[Proces " << world_rank << "] Rozdzielczosc: " << width << "x" << height << std::endl;
             dataSize = width * height * sizeof(unsigned char);
 
             checkCudaError(cudaMalloc((void**)&d_current, dataSize), "cudaMalloc d_current");
             checkCudaError(cudaMalloc((void**)&d_prev, dataSize), "cudaMalloc d_prev");
-            checkCudaError(cudaMalloc((void**)&d_mask, dataSize), "cudaMalloc d_mask");
-
+            checkCudaError(cudaMalloc((void**)&d_mask_raw, dataSize), "cudaMalloc d_mask_raw");
+            checkCudaError(cudaMalloc((void**)&d_mask_eroded, dataSize), "cudaMalloc d_mask_eroded");
+            checkCudaError(cudaMemset(d_mask_eroded, 0, dataSize), "cudaMemset d_mask_eroded");
             motionMaskGPU.create(height, width, CV_8UC1);
-            motionMaskOMP.create(height, width, CV_8UC1);
-
             checkCudaError(cudaMemcpy(d_prev, grayFrame.data, dataSize, cudaMemcpyHostToDevice), "cudaMemcpy d_prev (first frame)");
             isFirstFrame = false;
             continue;
         }
 
-        // === POCZĄTEK PRZETWARZANIA ===
+        // === Cały potok GPU (bez zmian) ===
         checkCudaError(cudaMemcpy(d_current, grayFrame.data, dataSize, cudaMemcpyHostToDevice), "cudaMemcpy d_current");
-
         dim3 threadsPerBlock(16, 16);
         dim3 numBlocks((width + threadsPerBlock.x - 1) / threadsPerBlock.x,
             (height + threadsPerBlock.y - 1) / threadsPerBlock.y);
-
-        diffAndThresholdKernel << <numBlocks, threadsPerBlock >> > (d_mask, d_current, d_prev, width, height, MOTION_THRESHOLD);
-
-        checkCudaError(cudaGetLastError(), "diffAndThresholdKernel launch");
+        diffAndThresholdKernel << <numBlocks, threadsPerBlock >> > (d_mask_raw, d_current, d_prev, width, height, MOTION_THRESHOLD);
+        erosionKernel << <numBlocks, threadsPerBlock >> > (d_mask_eroded, d_mask_raw, width, height);
+        checkCudaError(cudaGetLastError(), "Kernel launch failure");
         checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
-
-        checkCudaError(cudaMemcpy(motionMaskGPU.data, d_mask, dataSize, cudaMemcpyDeviceToHost), "cudaMemcpy d_mask (D2H)");
-
-        manualErosionOpenMP(motionMaskGPU, motionMaskOMP);
-
+        checkCudaError(cudaMemcpy(motionMaskGPU.data, d_mask_eroded, dataSize, cudaMemcpyDeviceToHost), "cudaMemcpy d_mask (D2H)");
         checkCudaError(cudaMemcpy(d_prev, d_current, dataSize, cudaMemcpyDeviceToDevice), "cudaMemcpy d_prev (D2D)");
-        // === KONIEC PRZETWARZANIA ===
+        // === Koniec potoku GPU ===
 
-        tm.stop(); // <-- Zakończ pomiar czasu
+        tm.stop();
 
-        // --- NOWOŚĆ: Wyświetlanie FPS ---
-        // Obliczamy FPS (używamy średniej kroczącej dla stabilności)
         double fps = tm.getFPS();
         std::string fpsText = "FPS: " + std::to_string((int)fps);
+        cv::putText(frame, fpsText, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
 
-        // Rysuj tekst FPS na oryginalnej klatce
-        cv::putText(frame,
-            fpsText,
-            cv::Point(10, 30), // Pozycja (X, Y)
-            cv::FONT_HERSHEY_SIMPLEX,
-            1.0, // Skala czcionki
-            cv::Scalar(0, 255, 0), // Kolor (zielony)
-            2); // Grubość
+        // ZMIANA: Używamy unikalnych tytułów okien
+        cv::imshow("Oryginal - " + windowTitle, frame);
+        cv::imshow("Maska - " + windowTitle, motionMaskGPU);
 
-        // Wyświetlanie wyników
-        cv::imshow("Oryginal (Kamera) z FPS", frame);
-        cv::imshow("Maska Ruchu (z GPU)", motionMaskGPU);
-        cv::imshow("Maska Ruchu po Morfologii (OpenMP)", motionMaskOMP);
-
-        // Obsługa klawiszy
         int key = cv::waitKey(1);
         if (key == 27) { // ESC
             break;
         }
-        // --- NOWOŚĆ: Zapisywanie klatek ---
         else if (key == 's' || key == 'S')
         {
-            std::string originalName = "klatka_" + std::to_string(frameCounter) + "_oryginal.png";
-            std::string maskName = "klatka_" + std::to_string(frameCounter) + "_maska_ruch.png";
+            // ZMIANA: Zapisujemy z unikalną nazwą procesu
+            std::string originalName = "proces_" + std::to_string(world_rank) + "_klatka_" + std::to_string(frameCounter) + "_oryginal.png";
+            std::string maskName = "proces_" + std::to_string(world_rank) + "_klatka_" + std::to_string(frameCounter) + "_maska_ruch.png";
 
             cv::imwrite(originalName, frame);
-            cv::imwrite(maskName, motionMaskOMP); // Zapisujemy końcową maskę po morfologii
+            cv::imwrite(maskName, motionMaskGPU);
 
-            std::cout << "ZAPISANO: " << originalName << " oraz " << maskName << std::endl;
+            std::cout << "[Proces " << world_rank << "] ZAPISANO klatki." << std::endl;
             frameCounter++;
         }
     }
 
     // --- Sprzątanie ---
-    std::cout << "Zamykanie..." << std::endl;
+    std::cout << "[Proces " << world_rank << "] Zamykanie..." << std::endl;
     cudaFree(d_current);
     cudaFree(d_prev);
-    cudaFree(d_mask);
+    cudaFree(d_mask_raw);
+    cudaFree(d_mask_eroded);
     cudaDeviceReset();
 
     cap.release();
     cv::destroyAllWindows();
 
+    // === 4. FINALIZACJA MPI ===
+    // Musi być na samym końcu, przed return
+    MPI_Finalize();
     return 0;
 }

@@ -8,15 +8,15 @@
 #include <opencv2/imgproc.hpp>    
 #include <opencv2/core/utility.hpp> // Dla cv::TickMeter
 
-// Nagłówek OpenMP
-#include <omp.h>
+// OpenMP już nie jest potrzebne
+// #include <omp.h> 
 
 #include <stdio.h>
 #include <iostream>
-#include <string> // Dla std::to_string
+#include <string> 
 
 // ======================================================================
-// KERNEL CUDA (bez zmian)
+// KERNEL CUDA 1: Różnicowanie i Progowanie (bez zmian)
 // ======================================================================
 
 __global__ void diffAndThresholdKernel(unsigned char* mask,
@@ -37,35 +37,51 @@ __global__ void diffAndThresholdKernel(unsigned char* mask,
 }
 
 // ======================================================================
-// FUNKCJA OpenMP (bez zmian)
+// NOWY KERNEL CUDA 2: Morfologia (Erozja)
 // ======================================================================
 
-void manualErosionOpenMP(const cv::Mat& src, cv::Mat& dst)
+/**
+ * @brief Kernel CUDA do wykonania erozji 3x3.
+ * Czyta z 'srcMask' (wynik kernela 1) i zapisuje do 'dstMask'.
+ * Nie można bezpiecznie czytać i pisać do tej samej pamięci w morfologii,
+ * dlatego potrzebujemy dwóch oddzielnych buforów.
+ */
+__global__ void erosionKernel(unsigned char* dstMask,
+    const unsigned char* srcMask,
+    int width, int height)
 {
-    dst.create(src.size(), src.type());
-    int rows = src.rows;
-    int cols = src.cols;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-#pragma omp parallel for collapse(2)
-    for (int y = 1; y < rows - 1; ++y)
+    // Pomijamy 1-pikselową ramkę, tak jak w wersji OpenMP
+    if (x > 0 && x < width - 1 && y > 0 && y < height - 1)
     {
-        for (int x = 1; x < cols - 1; ++x)
+        unsigned char minVal = 255;
+
+        // Pętla po oknie 3x3
+        for (int ky = -1; ky <= 1; ++ky)
         {
-            unsigned char minVal = 255;
-            for (int ky = -1; ky <= 1; ++ky)
+            for (int kx = -1; kx <= 1; ++kx)
             {
-                for (int kx = -1; kx <= 1; ++kx)
-                {
-                    unsigned char val = src.at<unsigned char>(y + ky, x + kx);
-                    if (val < minVal) {
-                        minVal = val;
-                    }
+                // Obliczamy indeks sąsiada
+                int neighborIdx = (y + ky) * width + (x + kx);
+
+                // Czytamy wartość sąsiada
+                unsigned char val = srcMask[neighborIdx];
+
+                if (val < minVal) {
+                    minVal = val;
                 }
             }
-            dst.at<unsigned char>(y, x) = minVal;
         }
+
+        // Zapisujemy minimalną wartość do bufora wyjściowego
+        int centerIdx = y * width + x;
+        dstMask[centerIdx] = minVal;
     }
+    // Piksele na ramce będą miały wartość 0 (z inicjalizacji pamięci)
 }
+
 
 // Funkcja pomocnicza do sprawdzania błędów CUDA
 void checkCudaError(cudaError_t status, const char* msg)
@@ -85,53 +101,46 @@ int main()
 {
     const int MOTION_THRESHOLD = 25;
 
-    // --- Ustawienie rozdzielczości (DO TESTÓW FPS) ---
-    // Domyślne to zazwyczaj 640x480. Możesz spróbować zmienić na 1280x720.
-
-
+    // ZMIANA TUTAJ: Podaj ścieżkę do swojego pliku wideo
     cv::VideoCapture cap("C:\\Users\\mnosel\\Downloads\\test.mp4");
     if (!cap.isOpened())
     {
-        std::cerr << "BLAD: Nie mozna otworzyc kamery internetowej!" << std::endl;
+        std::cerr << "BLAD: Nie mozna otworzyc pliku wideo!" << std::endl;
         std::cin.get();
         return -1;
     }
 
-    // Ustawienie żądanej rozdzielczości kamery
-    
-
-    std::cout << "Otwarto kamere. Rozpoczynanie przetwarzania..." << std::endl;
+    std::cout << "Otwarto plik wideo. Rozpoczynanie przetwarzania..." << std::endl;
     std::cout << "Nacisnij 'ESC', aby zakonczyc." << std::endl;
     std::cout << "Nacisnij 's', aby zapisac klatki." << std::endl;
 
     cv::Mat frame;
     cv::Mat grayFrame;
-    cv::Mat motionMaskGPU;
-    cv::Mat motionMaskOMP;
+    cv::Mat motionMaskGPU;  // Zmieniamy nazwę, to będzie końcowy wynik z GPU
 
+    // Wskaźniki do pamięci na GPU (Device)
     unsigned char* d_current = nullptr;
     unsigned char* d_prev = nullptr;
-    unsigned char* d_mask = nullptr;
+    unsigned char* d_mask_raw = nullptr;    // ZMIANA: Bufor na surową maskę (wynik kernela 1)
+    unsigned char* d_mask_eroded = nullptr; // NOWOŚĆ: Bufor na maskę po erozji (wynik kernela 2)
 
     int width, height;
     size_t dataSize = 0;
     bool isFirstFrame = true;
 
-    // --- NOWOŚĆ: Pomiar FPS ---
-    cv::TickMeter tm; // Obiekt do mierzenia czasu
-    int frameCounter = 0; // Licznik klatek do zapisu
+    cv::TickMeter tm;
+    int frameCounter = 0;
 
     while (true)
     {
-        tm.start(); // <-- Rozpocznij pomiar czasu
+        tm.start();
+
         cap.read(frame);
         if (frame.empty()) {
             std::cout << "Koniec pliku wideo. Zapetlanie..." << std::endl;
-            // Przewiń wideo z powrotem na klatkę 0
             cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-            // Zresetuj 'isFirstFrame', aby poprawnie załadować bufor 'd_prev'
             isFirstFrame = true;
-            continue; // Przejdź do następnej iteracji (wczyta nową klatkę 0)
+            continue;
         }
 
         cv::cvtColor(frame, grayFrame, cv::COLOR_BGR2GRAY);
@@ -140,76 +149,75 @@ int main()
         {
             width = grayFrame.cols;
             height = grayFrame.rows;
-            // Sprawdź, czy kamera faktycznie ustawiła żądaną rozdzielczość
             std::cout << "Rozdzielczosc przetwarzania: " << width << "x" << height << std::endl;
-
             dataSize = width * height * sizeof(unsigned char);
 
+            // Alokujemy 4 bufory na GPU
             checkCudaError(cudaMalloc((void**)&d_current, dataSize), "cudaMalloc d_current");
             checkCudaError(cudaMalloc((void**)&d_prev, dataSize), "cudaMalloc d_prev");
-            checkCudaError(cudaMalloc((void**)&d_mask, dataSize), "cudaMalloc d_mask");
+            checkCudaError(cudaMalloc((void**)&d_mask_raw, dataSize), "cudaMalloc d_mask_raw");
+            checkCudaError(cudaMalloc((void**)&d_mask_eroded, dataSize), "cudaMalloc d_mask_eroded");
+
+            // Zerujemy pamięć bufora wyjściowego (ważne dla ramki w erozji)
+            checkCudaError(cudaMemset(d_mask_eroded, 0, dataSize), "cudaMemset d_mask_eroded");
 
             motionMaskGPU.create(height, width, CV_8UC1);
-            motionMaskOMP.create(height, width, CV_8UC1);
 
             checkCudaError(cudaMemcpy(d_prev, grayFrame.data, dataSize, cudaMemcpyHostToDevice), "cudaMemcpy d_prev (first frame)");
             isFirstFrame = false;
             continue;
         }
 
-        // === POCZĄTEK PRZETWARZANIA ===
+        // === POCZĄTEK PRZETWARZANIA (WSZYSTKO NA GPU) ===
         checkCudaError(cudaMemcpy(d_current, grayFrame.data, dataSize, cudaMemcpyHostToDevice), "cudaMemcpy d_current");
 
         dim3 threadsPerBlock(16, 16);
         dim3 numBlocks((width + threadsPerBlock.x - 1) / threadsPerBlock.x,
             (height + threadsPerBlock.y - 1) / threadsPerBlock.y);
 
-        diffAndThresholdKernel << <numBlocks, threadsPerBlock >> > (d_mask, d_current, d_prev, width, height, MOTION_THRESHOLD);
+        // --- KROK 1 GPU: Różnicowanie i Progowanie ---
+        // Wynik trafia do d_mask_raw
+        diffAndThresholdKernel << <numBlocks, threadsPerBlock >> > (d_mask_raw, d_current, d_prev, width, height, MOTION_THRESHOLD);
 
-        checkCudaError(cudaGetLastError(), "diffAndThresholdKernel launch");
+        // --- KROK 2 GPU: Morfologia (Erozja) ---
+        // Kernel czyta z d_mask_raw i zapisuje do d_mask_eroded
+        erosionKernel << <numBlocks, threadsPerBlock >> > (d_mask_eroded, d_mask_raw, width, height);
+
+        checkCudaError(cudaGetLastError(), "Kernel launch failure");
         checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
 
-        checkCudaError(cudaMemcpy(motionMaskGPU.data, d_mask, dataSize, cudaMemcpyDeviceToHost), "cudaMemcpy d_mask (D2H)");
+        // 4. Kopiowanie KOŃCOWEGO wyniku (po erozji) z GPU -> CPU
+        checkCudaError(cudaMemcpy(motionMaskGPU.data, d_mask_eroded, dataSize, cudaMemcpyDeviceToHost), "cudaMemcpy d_mask (D2H)");
 
-        manualErosionOpenMP(motionMaskGPU, motionMaskOMP);
+        // 5. Morfologia OpenMP została usunięta
 
+        // 6. Aktualizacja bufora d_prev (D2D)
         checkCudaError(cudaMemcpy(d_prev, d_current, dataSize, cudaMemcpyDeviceToDevice), "cudaMemcpy d_prev (D2D)");
         // === KONIEC PRZETWARZANIA ===
 
-        tm.stop(); // <-- Zakończ pomiar czasu
+        tm.stop();
 
-        // --- NOWOŚĆ: Wyświetlanie FPS ---
-        // Obliczamy FPS (używamy średniej kroczącej dla stabilności)
         double fps = tm.getFPS();
         std::string fpsText = "FPS: " + std::to_string((int)fps);
 
-        // Rysuj tekst FPS na oryginalnej klatce
-        cv::putText(frame,
-            fpsText,
-            cv::Point(10, 30), // Pozycja (X, Y)
-            cv::FONT_HERSHEY_SIMPLEX,
-            1.0, // Skala czcionki
-            cv::Scalar(0, 255, 0), // Kolor (zielony)
-            2); // Grubość
+        cv::putText(frame, fpsText, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
 
         // Wyświetlanie wyników
-        cv::imshow("Oryginal (Kamera) z FPS", frame);
-        cv::imshow("Maska Ruchu (z GPU)", motionMaskGPU);
-        cv::imshow("Maska Ruchu po Morfologii (OpenMP)", motionMaskOMP);
+        cv::imshow("Oryginal (Wideo) z FPS", frame);
+        cv::imshow("Maska Ruchu (z GPU, po erozji)", motionMaskGPU);
+        // Usunęliśmy okno 'Maska Ruchu (z GPU)'
 
-        // Obsługa klawiszy
         int key = cv::waitKey(1);
         if (key == 27) { // ESC
             break;
         }
-        // --- NOWOŚĆ: Zapisywanie klatek ---
         else if (key == 's' || key == 'S')
         {
             std::string originalName = "klatka_" + std::to_string(frameCounter) + "_oryginal.png";
             std::string maskName = "klatka_" + std::to_string(frameCounter) + "_maska_ruch.png";
 
             cv::imwrite(originalName, frame);
-            cv::imwrite(maskName, motionMaskOMP); // Zapisujemy końcową maskę po morfologii
+            cv::imwrite(maskName, motionMaskGPU); // Zapisujemy końcową maskę
 
             std::cout << "ZAPISANO: " << originalName << " oraz " << maskName << std::endl;
             frameCounter++;
@@ -220,7 +228,8 @@ int main()
     std::cout << "Zamykanie..." << std::endl;
     cudaFree(d_current);
     cudaFree(d_prev);
-    cudaFree(d_mask);
+    cudaFree(d_mask_raw); // Sprzątamy nowy bufor
+    cudaFree(d_mask_eroded); // Sprzątamy nowy bufor
     cudaDeviceReset();
 
     cap.release();

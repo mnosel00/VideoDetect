@@ -53,20 +53,16 @@ __global__ void erosionKernel(unsigned char* dstMask,
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    // Pomijamy 1-pikselową ramkę, tak jak w wersji OpenMP
     if (x > 0 && x < width - 1 && y > 0 && y < height - 1)
     {
         unsigned char minVal = 255;
 
-        // Pętla po oknie 3x3
         for (int ky = -1; ky <= 1; ++ky)
         {
             for (int kx = -1; kx <= 1; ++kx)
             {
-                // Obliczamy indeks sąsiada
                 int neighborIdx = (y + ky) * width + (x + kx);
 
-                // Czytamy wartość sąsiada
                 unsigned char val = srcMask[neighborIdx];
 
                 if (val < minVal) {
@@ -75,11 +71,9 @@ __global__ void erosionKernel(unsigned char* dstMask,
             }
         }
 
-        // Zapisujemy minimalną wartość do bufora wyjściowego
         int centerIdx = y * width + x;
         dstMask[centerIdx] = minVal;
     }
-    // Piksele na ramce będą miały wartość 0 (z inicjalizacji pamięci)
 }
 
 
@@ -102,7 +96,7 @@ int main()
     const int MOTION_THRESHOLD = 25;
 
     // ZMIANA TUTAJ: Podaj ścieżkę do swojego pliku wideo
-    cv::VideoCapture cap("C:\\Users\\mnosel\\Downloads\\test.mp4");
+    cv::VideoCapture cap("C:\\Users\\mnosel\\Downloads\\test0.mp4");
     if (!cap.isOpened())
     {
         std::cerr << "BLAD: Nie mozna otworzyc pliku wideo!" << std::endl;
@@ -121,8 +115,8 @@ int main()
     // Wskaźniki do pamięci na GPU (Device)
     unsigned char* d_current = nullptr;
     unsigned char* d_prev = nullptr;
-    unsigned char* d_mask_raw = nullptr;    // ZMIANA: Bufor na surową maskę (wynik kernela 1)
-    unsigned char* d_mask_eroded = nullptr; // NOWOŚĆ: Bufor na maskę po erozji (wynik kernela 2)
+    unsigned char* d_mask_raw = nullptr;    // Bufor na surową maskę (wynik kernela 1)
+    unsigned char* d_mask_eroded = nullptr; // Bufor na maskę po erozji (wynik kernela 2)
 
     int width, height;
     size_t dataSize = 0;
@@ -168,32 +162,29 @@ int main()
             continue;
         }
 
-        // === POCZĄTEK PRZETWARZANIA (WSZYSTKO NA GPU) ===
+        //POCZĄTEK PRZETWARZANIA
         checkCudaError(cudaMemcpy(d_current, grayFrame.data, dataSize, cudaMemcpyHostToDevice), "cudaMemcpy d_current");
 
         dim3 threadsPerBlock(16, 16);
         dim3 numBlocks((width + threadsPerBlock.x - 1) / threadsPerBlock.x,
             (height + threadsPerBlock.y - 1) / threadsPerBlock.y);
 
-        // --- KROK 1 GPU: Różnicowanie i Progowanie ---
         // Wynik trafia do d_mask_raw
         diffAndThresholdKernel << <numBlocks, threadsPerBlock >> > (d_mask_raw, d_current, d_prev, width, height, MOTION_THRESHOLD);
 
-        // --- KROK 2 GPU: Morfologia (Erozja) ---
+        
         // Kernel czyta z d_mask_raw i zapisuje do d_mask_eroded
         erosionKernel << <numBlocks, threadsPerBlock >> > (d_mask_eroded, d_mask_raw, width, height);
 
         checkCudaError(cudaGetLastError(), "Kernel launch failure");
         checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
 
-        // 4. Kopiowanie KOŃCOWEGO wyniku (po erozji) z GPU -> CPU
+        // 4. Kopiowanie wyniku  z GPU -> CPU
         checkCudaError(cudaMemcpy(motionMaskGPU.data, d_mask_eroded, dataSize, cudaMemcpyDeviceToHost), "cudaMemcpy d_mask (D2H)");
-
-        // 5. Morfologia OpenMP została usunięta
 
         // 6. Aktualizacja bufora d_prev (D2D)
         checkCudaError(cudaMemcpy(d_prev, d_current, dataSize, cudaMemcpyDeviceToDevice), "cudaMemcpy d_prev (D2D)");
-        // === KONIEC PRZETWARZANIA ===
+        //KONIEC PRZETWARZANIA
 
         tm.stop();
 
@@ -211,16 +202,45 @@ int main()
         if (key == 27) { // ESC
             break;
         }
+        // --- POPRAWIONA SEKCJA ZAPISYWANIA (3 KLATKI) ---
         else if (key == 's' || key == 'S')
         {
-            std::string originalName = "klatka_" + std::to_string(frameCounter) + "_oryginal.png";
-            std::string maskName = "klatka_" + std::to_string(frameCounter) + "_maska_ruch.png";
+            // === USTAWIENIE ŚCIEŻKI ===
+            // Zmień "mnosel" na swoją nazwę użytkownika!
+            std::string savePath = "C:\\Users\\mnosel\\Desktop\\";
 
-            cv::imwrite(originalName, frame);
-            cv::imwrite(maskName, motionMaskGPU); // Zapisujemy końcową maskę
+            // Nazwy plików dla wszystkich trzech obrazów
+            std::string originalName = savePath + "klatka_" + std::to_string(frameCounter) + "_1_oryginal.png";
+            std::string maskRawName = savePath + "klatka_" + std::to_string(frameCounter) + "_2_maska_z_szumem.png";
+            std::string maskCleanName = savePath + "klatka_" + std::to_string(frameCounter) + "_3_maska_oczyszczona.png";
 
-            std::cout << "ZAPISANO: " << originalName << " oraz " << maskName << std::endl;
-            frameCounter++;
+            // Sprawdzamy, czy obraz oryginalny nie jest pusty
+            if (frame.empty()) {
+                std::cerr << "BLAD: Proba zapisu pustej klatki!" << std::endl;
+            }
+            else
+            {
+                // ---- NOWY KROK DLA WERSJI FULL-GPU ----
+                // Tworzymy tymczasowy kontener 'Mat' na CPU
+                cv::Mat h_mask_raw(height, width, CV_8UC1);
+                // Kopiujemy "brudną" maskę (z szumami) z d_mask_raw (GPU) do h_mask_raw (CPU)
+                checkCudaError(cudaMemcpy(h_mask_raw.data, d_mask_raw, dataSize, cudaMemcpyDeviceToHost), "Copy raw mask D2H for saving");
+                // -----------------------------------------
+
+                // Zapisujemy wszystkie trzy obrazy
+                bool success1 = cv::imwrite(originalName, frame);         // 1. Oryginał
+                bool success2 = cv::imwrite(maskRawName, h_mask_raw);   // 2. Maska "z szumami" (którą właśnie skopiowaliśmy)
+                bool success3 = cv::imwrite(maskCleanName, motionMaskGPU); // 3. Maska "oczyszczona" (jest już na CPU)
+
+                if (success1 && success2 && success3) {
+                    std::cout << "ZAPISANO POMYSLNIE (3 pliki) do: " << savePath << std::endl;
+                }
+                else {
+                    std::cerr << "BLAD ZAPISU: Nie udalo sie zapisac wszystkich klatek. Sprawdz sciezke: " << savePath << std::endl;
+                }
+
+                frameCounter++;
+            }
         }
     }
 

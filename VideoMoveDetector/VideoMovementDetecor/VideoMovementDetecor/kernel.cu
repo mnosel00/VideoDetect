@@ -89,7 +89,7 @@ int main()
     // Domyślne to zazwyczaj 640x480. Możesz spróbować zmienić na 1280x720.
 
 
-    cv::VideoCapture cap("C:\\Users\\mnosel\\Downloads\\test.mp4");
+    cv::VideoCapture cap("C:\\Users\\mnosel\\Downloads\\test0.mp4");
     if (!cap.isOpened())
     {
         std::cerr << "BLAD: Nie mozna otworzyc kamery internetowej!" << std::endl;
@@ -123,16 +123,15 @@ int main()
 
     while (true)
     {
-        tm.start(); // <-- Rozpocznij pomiar czasu
+        tm.start(); //pomiar czasu
         cap.read(frame);
+
         if (frame.empty()) {
-            std::cout << "Koniec pliku wideo. Zapetlanie..." << std::endl;
-            // Przewiń wideo z powrotem na klatkę 0
+            std::cout << "Reset filmu" << std::endl;
             cap.set(cv::CAP_PROP_POS_FRAMES, 0);
-            // Zresetuj 'isFirstFrame', aby poprawnie załadować bufor 'd_prev'
             isFirstFrame = true;
-            continue; // Przejdź do następnej iteracji (wczyta nową klatkę 0)
-        }
+            continue; //wczytanie nową klatkę 0)
+        } //reset filmu
 
         cv::cvtColor(frame, grayFrame, cv::COLOR_BGR2GRAY);
 
@@ -203,16 +202,40 @@ int main()
             break;
         }
         // --- NOWOŚĆ: Zapisywanie klatek ---
+        // --- POPRAWIONA SEKCJA ZAPISYWANIA KSTATEK ---
+        // --- POPRAWIONA SEKCJA ZAPISYWANIA (3 KLATKI) ---
         else if (key == 's' || key == 'S')
         {
-            std::string originalName = "klatka_" + std::to_string(frameCounter) + "_oryginal.png";
-            std::string maskName = "klatka_" + std::to_string(frameCounter) + "_maska_ruch.png";
+            // === USTAWIENIE ŚCIEŻKI ===
+            // Zmień "mnosel" na swoją nazwę użytkownika!
+            std::string savePath = "C:\\Users\\mnosel\\Desktop\\";
 
-            cv::imwrite(originalName, frame);
-            cv::imwrite(maskName, motionMaskOMP); // Zapisujemy końcową maskę po morfologii
+            // Nazwy plików dla wszystkich trzech obrazów
+            // Dodajemy numerację (1, 2, 3), aby sortowały się poprawnie
+            std::string originalName = savePath + "klatka_" + std::to_string(frameCounter) + "_1_oryginal.png";
+            std::string maskRawName = savePath + "klatka_" + std::to_string(frameCounter) + "_2_maska_z_szumem.png";
+            std::string maskCleanName = savePath + "klatka_" + std::to_string(frameCounter) + "_3_maska_oczyszczona.png";
 
-            std::cout << "ZAPISANO: " << originalName << " oraz " << maskName << std::endl;
-            frameCounter++;
+            // Sprawdzamy, czy obrazy nie są puste
+            if (frame.empty() || motionMaskGPU.empty() || motionMaskOMP.empty()) {
+                std::cerr << "BLAD: Proba zapisu pustej klatki!" << std::endl;
+            }
+            else
+            {
+                // Zapisujemy wszystkie trzy obrazy
+                bool success1 = cv::imwrite(originalName, frame);         // Oryginał
+                bool success2 = cv::imwrite(maskRawName, motionMaskGPU); // Maska "z szumami"
+                bool success3 = cv::imwrite(maskCleanName, motionMaskOMP); // Maska "po oczyszczeniu"
+
+                if (success1 && success2 && success3) {
+                    std::cout << "ZAPISANO POMYSLNIE (3 pliki) do: " << savePath << std::endl;
+                }
+                else {
+                    std::cerr << "BLAD ZAPISU: Nie udalo sie zapisac wszystkich klatek. Sprawdz sciezke: " << savePath << std::endl;
+                }
+
+                frameCounter++;
+            }
         }
     }
 

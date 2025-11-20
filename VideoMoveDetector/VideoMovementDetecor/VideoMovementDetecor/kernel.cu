@@ -17,11 +17,7 @@
 // Nagłówek MPI
 #include <mpi.h>
 
-// ======================================================================
-// OBA KERNELE CUDA (diffAndThresholdKernel i erosionKernel)
-// POZOSTAJĄ BEZ ZMIAN - (nie wklejam ich tu ponownie dla zwięzłości,
-// ale upewnij się, że są w Twoim pliku - po prostu je zostaw)
-// ======================================================================
+// OBA KERNELE CUDA (diffAndThresholdKernel i erosionKernel)  bez zmian
 
 __global__ void diffAndThresholdKernel(unsigned char* mask,
     const unsigned char* current,
@@ -67,36 +63,26 @@ __global__ void erosionKernel(unsigned char* dstMask,
 }
 
 
-// Funkcja pomocnicza do sprawdzania błędów CUDA
 void checkCudaError(cudaError_t status, const char* msg)
 {
     if (status != cudaSuccess) {
         fprintf(stderr, "Blad CUDA: %s: %s\n", msg, cudaGetErrorString(status));
         cudaDeviceReset();
-        // W MPI lepiej nie robić exit(), tylko zakończyć program
         MPI_Abort(MPI_COMM_WORLD, status);
     }
 }
 
-// ======================================================================
-// GŁÓWNA FUNKCJA PROGRAMU (ZMIANY MPI)
-// ======================================================================
-
-// ZMIANA: main musi teraz przyjmować argumenty dla MPI
-// ======================================================================
-// GŁÓWNA FUNKCJA PROGRAMU (ZMIANY MPI + ROZMIAR OKIEN)
-// ======================================================================
 
 int main(int argc, char* argv[])
 {
-    // === 1. INICJALIZACJA MPI ===
+    //INICJALIZACJA MPI
     int world_rank;
     int world_size;
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    // === 2. LISTA ZADAŃ (PLIKI WIDEO) ===
+    
     std::vector<std::string> videoFiles = {
         "C:\\Users\\mnosel\\Downloads\\test0.mp4",
         "C:\\Users\\mnosel\\Downloads\\test1.mp4",
@@ -110,25 +96,23 @@ int main(int argc, char* argv[])
         return -1;
     }
 
-    // === 3. ROZDZIAŁ PRACY (Logika MPI) ===
+    //ROZDZIAŁ PRACY (Logika MPI)
     std::string myVideoFile = videoFiles[world_rank % videoFiles.size()];
 
-    // --- NOWOŚĆ: Ustawienia wyświetlania dla siatki 4x2 ---
-    const int DISPLAY_WIDTH = 480;   // Stała szerokość okna
-    int displayHeight = 270;        // Domyślna wysokość (dla 16:9)
+    // wyświetlanie dla siatki 4x2
+    const int DISPLAY_WIDTH = 480;   
+    int displayHeight = 270;        
 
-    // Unikalne nazwy okien dla każdego procesu
     std::string windowTitle_Orig = "Oryginal - Proces " + std::to_string(world_rank);
     std::string windowTitle_Mask = "Maska - Proces " + std::to_string(world_rank);
 
-    // Tworzymy okna PRZED pętlą, aby móc je przesuwać
+   
     cv::namedWindow(windowTitle_Orig, cv::WINDOW_AUTOSIZE);
     cv::namedWindow(windowTitle_Mask, cv::WINDOW_AUTOSIZE);
     // ---------------------------------------------------
 
     std::cout << "[Proces " << world_rank << "/" << world_size << "] Rozpoczynam przetwarzanie: " << myVideoFile << std::endl;
 
-    // === 4. POTOK PRZETWARZANIA (identyczny jak wcześniej) ===
     const int MOTION_THRESHOLD = 25;
     cv::VideoCapture cap(myVideoFile);
     if (!cap.isOpened()) {
@@ -171,12 +155,9 @@ int main(int argc, char* argv[])
             motionMaskGPU.create(height, width, CV_8UC1);
             checkCudaError(cudaMemcpy(d_prev, grayFrame.data, dataSize, cudaMemcpyHostToDevice), "cudaMemcpy d_prev (first frame)");
 
-            // --- NOWOŚĆ: Ustawiamy pozycję okien (tylko raz) ---
-            // Obliczamy proporcjonalną wysokość na podstawie wczytanego wideo
             displayHeight = (int)((double)height / width * DISPLAY_WIDTH);
 
-            // Obliczamy pozycję w siatce 4x2
-            // Zakładamy, że mamy co najmniej 4 procesy
+           
             int grid_x = world_rank % 2; // 0 lub 1 (kolumna)
             int grid_y = world_rank / 2; // 0 lub 1 (wiersz)
 
@@ -193,7 +174,7 @@ int main(int argc, char* argv[])
             continue;
         }
 
-        // === Cały potok GPU (bez zmian) ===
+        
         checkCudaError(cudaMemcpy(d_current, grayFrame.data, dataSize, cudaMemcpyHostToDevice), "cudaMemcpy d_current");
         dim3 threadsPerBlock(16, 16);
         dim3 numBlocks((width + threadsPerBlock.x - 1) / threadsPerBlock.x, (height + threadsPerBlock.y - 1) / threadsPerBlock.y);
@@ -203,19 +184,17 @@ int main(int argc, char* argv[])
         checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
         checkCudaError(cudaMemcpy(motionMaskGPU.data, d_mask_eroded, dataSize, cudaMemcpyDeviceToHost), "cudaMemcpy d_mask (D2H)");
         checkCudaError(cudaMemcpy(d_prev, d_current, dataSize, cudaMemcpyDeviceToDevice), "cudaMemcpy d_prev (D2D)");
-        // === Koniec potoku GPU ===
 
         tm.stop();
         double fps = tm.getFPS();
         std::string fpsText = "FPS: " + std::to_string((int)fps);
         cv::putText(frame, fpsText, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
 
-        // === NOWOŚĆ: Pomniejszanie okien do wyświetlania ===
+        
         cv::Mat smallFrame, smallMask;
         cv::resize(frame, smallFrame, cv::Size(DISPLAY_WIDTH, displayHeight));
         cv::resize(motionMaskGPU, smallMask, cv::Size(DISPLAY_WIDTH, displayHeight), 0, 0, cv::INTER_NEAREST);
 
-        // Wyświetlamy pomniejszone obrazy
         cv::imshow(windowTitle_Orig, smallFrame);
         cv::imshow(windowTitle_Mask, smallMask);
         // -------------------------------------------------
@@ -239,14 +218,13 @@ int main(int argc, char* argv[])
             std::string savePath = "C:\\Users\\mnosel\\Desktop\\";
             std::string originalName = savePath + "proces_" + std::to_string(world_rank) + "_klatka_" + std::to_string(frameCounter) + "_oryginal.png";
             std::string maskName = savePath + "proces_" + std::to_string(world_rank) + "_klatka_" + std::to_string(frameCounter) + "_maska_ruch.png";
-            cv::imwrite(originalName, frame); // Zapisujemy pełnowymiarową klatkę
-            cv::imwrite(maskName, motionMaskGPU); // Zapisujemy pełnowymiarową maskę
+            cv::imwrite(originalName, frame); 
+            cv::imwrite(maskName, motionMaskGPU); 
             if (world_rank == 0) { std::cout << "ZAPISANO klatki (wszystkie procesy)..." << std::endl; }
             frameCounter++;
         }
     }
 
-    // --- Sprzątanie ---
     std::cout << "[Proces " << world_rank << "] Zamykanie..." << std::endl;
     cudaFree(d_current);
     cudaFree(d_prev);

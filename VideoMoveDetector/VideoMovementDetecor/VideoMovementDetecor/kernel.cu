@@ -83,83 +83,74 @@ void checkCudaError(cudaError_t status, const char* msg)
 // ======================================================================
 
 // ZMIANA: main musi teraz przyjmować argumenty dla MPI
+// ======================================================================
+// GŁÓWNA FUNKCJA PROGRAMU (ZMIANY MPI + ROZMIAR OKIEN)
+// ======================================================================
+
 int main(int argc, char* argv[])
 {
     // === 1. INICJALIZACJA MPI ===
-    int world_rank; // ID tego procesu (np. 0, 1, 2...)
-    int world_size; // Całkowita liczba procesów (ile kopii uruchomiliśmy)
-
-    MPI_Init(&argc, &argv); // Inicjujemy MPI
-    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank); // Pobieramy nasze ID
-    MPI_Comm_size(MPI_COMM_WORLD, &world_size); // Pobieramy łączną liczbę procesów
+    int world_rank;
+    int world_size;
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
     // === 2. LISTA ZADAŃ (PLIKI WIDEO) ===
-    // Każdy proces musi znać całą listę.
-    // Upewnij się, że masz te pliki i ścieżki są poprawne!
     std::vector<std::string> videoFiles = {
         "C:\\Users\\mnosel\\Downloads\\test0.mp4",
         "C:\\Users\\mnosel\\Downloads\\test1.mp4",
         "C:\\Users\\mnosel\\Downloads\\test2.mp4",
         "C:\\Users\\mnosel\\Downloads\\test3.mp4",
-        // Możesz dodać więcej filmów, jeśli chcesz
     };
 
     if (videoFiles.empty()) {
-        if (world_rank == 0) { // Tylko proces 0 (główny) wypisze błąd
-            std::cerr << "BLAD: Lista plikow wideo jest pusta!" << std::endl;
-        }
+        if (world_rank == 0) { std::cerr << "BLAD: Lista plikow wideo jest pusta!" << std::endl; }
         MPI_Finalize();
         return -1;
     }
 
     // === 3. ROZDZIAŁ PRACY (Logika MPI) ===
-    // Używamy naszego 'rank' (ID), aby wybrać plik wideo.
-    // Operator modulo (%) zapewnia, że zadania zostaną rozdzielone,
-    // nawet jeśli mamy więcej procesów niż filmów.
     std::string myVideoFile = videoFiles[world_rank % videoFiles.size()];
 
-    // Tworzymy unikalny tytuł okna dla każdego procesu
-    std::string windowTitle = "Proces " + std::to_string(world_rank);
+    // --- NOWOŚĆ: Ustawienia wyświetlania dla siatki 4x2 ---
+    const int DISPLAY_WIDTH = 480;   // Stała szerokość okna
+    int displayHeight = 270;        // Domyślna wysokość (dla 16:9)
+
+    // Unikalne nazwy okien dla każdego procesu
+    std::string windowTitle_Orig = "Oryginal - Proces " + std::to_string(world_rank);
+    std::string windowTitle_Mask = "Maska - Proces " + std::to_string(world_rank);
+
+    // Tworzymy okna PRZED pętlą, aby móc je przesuwać
+    cv::namedWindow(windowTitle_Orig, cv::WINDOW_AUTOSIZE);
+    cv::namedWindow(windowTitle_Mask, cv::WINDOW_AUTOSIZE);
+    // ---------------------------------------------------
 
     std::cout << "[Proces " << world_rank << "/" << world_size << "] Rozpoczynam przetwarzanie: " << myVideoFile << std::endl;
 
-    // ===============================================================
-    // Reszta kodu jest identyczna jak poprzednio,
-    // tylko używa zmiennej 'myVideoFile' zamiast stałej ścieżki
-    // ===============================================================
-
+    // === 4. POTOK PRZETWARZANIA (identyczny jak wcześniej) ===
     const int MOTION_THRESHOLD = 25;
-
-    cv::VideoCapture cap(myVideoFile); // <-- ZMIANA: Używamy pliku przypisanego przez MPI
-
-    if (!cap.isOpened())
-    {
+    cv::VideoCapture cap(myVideoFile);
+    if (!cap.isOpened()) {
         std::cerr << "[Proces " << world_rank << "] BLAD: Nie mozna otworzyc pliku: " << myVideoFile << std::endl;
-        MPI_Finalize(); // Zakończ MPI przed wyjściem
+        MPI_Finalize();
         return -1;
     }
 
-    cv::Mat frame;
-    cv::Mat grayFrame;
-    cv::Mat motionMaskGPU;
-
+    cv::Mat frame, grayFrame, motionMaskGPU;
     unsigned char* d_current = nullptr, * d_prev = nullptr;
     unsigned char* d_mask_raw = nullptr, * d_mask_eroded = nullptr;
-
     int width, height;
     size_t dataSize = 0;
     bool isFirstFrame = true;
-
     cv::TickMeter tm;
     int frameCounter = 0;
 
     while (true)
     {
         tm.start();
-
         cap.read(frame);
         if (frame.empty()) {
-            // std::cout << "[Proces " << world_rank << "] Koniec pliku, zapetlanie." << std::endl;
             cap.set(cv::CAP_PROP_POS_FRAMES, 0);
             isFirstFrame = true;
             continue;
@@ -171,9 +162,7 @@ int main(int argc, char* argv[])
         {
             width = grayFrame.cols;
             height = grayFrame.rows;
-            // std::cout << "[Proces " << world_rank << "] Rozdzielczosc: " << width << "x" << height << std::endl;
             dataSize = width * height * sizeof(unsigned char);
-
             checkCudaError(cudaMalloc((void**)&d_current, dataSize), "cudaMalloc d_current");
             checkCudaError(cudaMalloc((void**)&d_prev, dataSize), "cudaMalloc d_prev");
             checkCudaError(cudaMalloc((void**)&d_mask_raw, dataSize), "cudaMalloc d_mask_raw");
@@ -181,6 +170,25 @@ int main(int argc, char* argv[])
             checkCudaError(cudaMemset(d_mask_eroded, 0, dataSize), "cudaMemset d_mask_eroded");
             motionMaskGPU.create(height, width, CV_8UC1);
             checkCudaError(cudaMemcpy(d_prev, grayFrame.data, dataSize, cudaMemcpyHostToDevice), "cudaMemcpy d_prev (first frame)");
+
+            // --- NOWOŚĆ: Ustawiamy pozycję okien (tylko raz) ---
+            // Obliczamy proporcjonalną wysokość na podstawie wczytanego wideo
+            displayHeight = (int)((double)height / width * DISPLAY_WIDTH);
+
+            // Obliczamy pozycję w siatce 4x2
+            // Zakładamy, że mamy co najmniej 4 procesy
+            int grid_x = world_rank % 2; // 0 lub 1 (kolumna)
+            int grid_y = world_rank / 2; // 0 lub 1 (wiersz)
+
+            // Procesy 0,1,2,3... -> (0,0), (1,0), (0,1), (1,1)
+            int posX_Orig = grid_x * (DISPLAY_WIDTH + 10); // +10 na ramkę
+            int posX_Mask = posX_Orig + DISPLAY_WIDTH + 10;
+            int posY_All = grid_y * (displayHeight + 40); // +40 na pasek tytułowy
+
+            cv::moveWindow(windowTitle_Orig, posX_Orig, posY_All);
+            cv::moveWindow(windowTitle_Mask, posX_Mask, posY_All);
+            // -------------------------------------------------
+
             isFirstFrame = false;
             continue;
         }
@@ -188,8 +196,7 @@ int main(int argc, char* argv[])
         // === Cały potok GPU (bez zmian) ===
         checkCudaError(cudaMemcpy(d_current, grayFrame.data, dataSize, cudaMemcpyHostToDevice), "cudaMemcpy d_current");
         dim3 threadsPerBlock(16, 16);
-        dim3 numBlocks((width + threadsPerBlock.x - 1) / threadsPerBlock.x,
-            (height + threadsPerBlock.y - 1) / threadsPerBlock.y);
+        dim3 numBlocks((width + threadsPerBlock.x - 1) / threadsPerBlock.x, (height + threadsPerBlock.y - 1) / threadsPerBlock.y);
         diffAndThresholdKernel << <numBlocks, threadsPerBlock >> > (d_mask_raw, d_current, d_prev, width, height, MOTION_THRESHOLD);
         erosionKernel << <numBlocks, threadsPerBlock >> > (d_mask_eroded, d_mask_raw, width, height);
         checkCudaError(cudaGetLastError(), "Kernel launch failure");
@@ -199,29 +206,42 @@ int main(int argc, char* argv[])
         // === Koniec potoku GPU ===
 
         tm.stop();
-
         double fps = tm.getFPS();
         std::string fpsText = "FPS: " + std::to_string((int)fps);
         cv::putText(frame, fpsText, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
 
-        // ZMIANA: Używamy unikalnych tytułów okien
-        cv::imshow("Oryginal - " + windowTitle, frame);
-        cv::imshow("Maska - " + windowTitle, motionMaskGPU);
+        // === NOWOŚĆ: Pomniejszanie okien do wyświetlania ===
+        cv::Mat smallFrame, smallMask;
+        cv::resize(frame, smallFrame, cv::Size(DISPLAY_WIDTH, displayHeight));
+        cv::resize(motionMaskGPU, smallMask, cv::Size(DISPLAY_WIDTH, displayHeight), 0, 0, cv::INTER_NEAREST);
 
+        // Wyświetlamy pomniejszone obrazy
+        cv::imshow(windowTitle_Orig, smallFrame);
+        cv::imshow(windowTitle_Mask, smallMask);
+        // -------------------------------------------------
+
+        // === ZSYNCHRONIZOWANA OBSŁUGA KLAWISZY (MPI) ===
         int key = cv::waitKey(1);
-        if (key == 27) { // ESC
+        int local_save_command = (key == 's' || key == 'S') ? 1 : 0;
+        int local_quit_command = (key == 27) ? 1 : 0;
+        int global_save_command = 0;
+        int global_quit_command = 0;
+
+        MPI_Allreduce(&local_save_command, &global_save_command, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+        MPI_Allreduce(&local_quit_command, &global_quit_command, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+
+        if (global_quit_command == 1) {
             break;
         }
-        else if (key == 's' || key == 'S')
+
+        if (global_save_command == 1)
         {
-            // ZMIANA: Zapisujemy z unikalną nazwą procesu
-            std::string originalName = "proces_" + std::to_string(world_rank) + "_klatka_" + std::to_string(frameCounter) + "_oryginal.png";
-            std::string maskName = "proces_" + std::to_string(world_rank) + "_klatka_" + std::to_string(frameCounter) + "_maska_ruch.png";
-
-            cv::imwrite(originalName, frame);
-            cv::imwrite(maskName, motionMaskGPU);
-
-            std::cout << "[Proces " << world_rank << "] ZAPISANO klatki." << std::endl;
+            std::string savePath = "C:\\Users\\mnosel\\Desktop\\";
+            std::string originalName = savePath + "proces_" + std::to_string(world_rank) + "_klatka_" + std::to_string(frameCounter) + "_oryginal.png";
+            std::string maskName = savePath + "proces_" + std::to_string(world_rank) + "_klatka_" + std::to_string(frameCounter) + "_maska_ruch.png";
+            cv::imwrite(originalName, frame); // Zapisujemy pełnowymiarową klatkę
+            cv::imwrite(maskName, motionMaskGPU); // Zapisujemy pełnowymiarową maskę
+            if (world_rank == 0) { std::cout << "ZAPISANO klatki (wszystkie procesy)..." << std::endl; }
             frameCounter++;
         }
     }
@@ -238,7 +258,6 @@ int main(int argc, char* argv[])
     cv::destroyAllWindows();
 
     // === 4. FINALIZACJA MPI ===
-    // Musi być na samym końcu, przed return
     MPI_Finalize();
     return 0;
 }

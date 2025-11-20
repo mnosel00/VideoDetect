@@ -9,15 +9,12 @@
 #include <opencv2/core/utility.hpp> // Dla cv::TickMeter
 
 // OpenMP już nie jest potrzebne
-// #include <omp.h> 
 
 #include <stdio.h>
 #include <iostream>
 #include <string> 
 
-// ======================================================================
 // KERNEL CUDA 1: Różnicowanie i Progowanie (bez zmian)
-// ======================================================================
 
 __global__ void diffAndThresholdKernel(unsigned char* mask,
     const unsigned char* current,
@@ -36,9 +33,7 @@ __global__ void diffAndThresholdKernel(unsigned char* mask,
     }
 }
 
-// ======================================================================
-// NOWY KERNEL CUDA 2: Morfologia (Erozja)
-// ======================================================================
+//KERNEL CUDA 2: Morfologia (Erozja)
 
 /**
  * @brief Kernel CUDA do wykonania erozji 3x3.
@@ -87,15 +82,10 @@ void checkCudaError(cudaError_t status, const char* msg)
     }
 }
 
-// ======================================================================
-// GŁÓWNA FUNKCJA PROGRAMU (ZMIANY)
-// ======================================================================
-
 int main()
 {
     const int MOTION_THRESHOLD = 25;
 
-    // ZMIANA TUTAJ: Podaj ścieżkę do swojego pliku wideo
     cv::VideoCapture cap("C:\\Users\\mnosel\\Downloads\\test0.mp4");
     if (!cap.isOpened())
     {
@@ -110,7 +100,7 @@ int main()
 
     cv::Mat frame;
     cv::Mat grayFrame;
-    cv::Mat motionMaskGPU;  // Zmieniamy nazwę, to będzie końcowy wynik z GPU
+    cv::Mat motionMaskGPU;  // Zmieniamy nazwę końcowy wynik z GPU
 
     // Wskaźniki do pamięci na GPU (Device)
     unsigned char* d_current = nullptr;
@@ -146,13 +136,13 @@ int main()
             std::cout << "Rozdzielczosc przetwarzania: " << width << "x" << height << std::endl;
             dataSize = width * height * sizeof(unsigned char);
 
-            // Alokujemy 4 bufory na GPU
+            // 4 bufory na GPU
             checkCudaError(cudaMalloc((void**)&d_current, dataSize), "cudaMalloc d_current");
             checkCudaError(cudaMalloc((void**)&d_prev, dataSize), "cudaMalloc d_prev");
             checkCudaError(cudaMalloc((void**)&d_mask_raw, dataSize), "cudaMalloc d_mask_raw");
             checkCudaError(cudaMalloc((void**)&d_mask_eroded, dataSize), "cudaMalloc d_mask_eroded");
 
-            // Zerujemy pamięć bufora wyjściowego (ważne dla ramki w erozji)
+            // Zerowanie pamięci bufora wyjściowego -  ramki w erozji
             checkCudaError(cudaMemset(d_mask_eroded, 0, dataSize), "cudaMemset d_mask_eroded");
 
             motionMaskGPU.create(height, width, CV_8UC1);
@@ -169,7 +159,7 @@ int main()
         dim3 numBlocks((width + threadsPerBlock.x - 1) / threadsPerBlock.x,
             (height + threadsPerBlock.y - 1) / threadsPerBlock.y);
 
-        // Wynik trafia do d_mask_raw
+        // Wynik  do d_mask_raw
         diffAndThresholdKernel << <numBlocks, threadsPerBlock >> > (d_mask_raw, d_current, d_prev, width, height, MOTION_THRESHOLD);
 
         
@@ -179,7 +169,7 @@ int main()
         checkCudaError(cudaGetLastError(), "Kernel launch failure");
         checkCudaError(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
 
-        // 4. Kopiowanie wyniku  z GPU -> CPU
+        //GPU -> CPU
         checkCudaError(cudaMemcpy(motionMaskGPU.data, d_mask_eroded, dataSize, cudaMemcpyDeviceToHost), "cudaMemcpy d_mask (D2H)");
 
         // 6. Aktualizacja bufora d_prev (D2D)
@@ -193,44 +183,37 @@ int main()
 
         cv::putText(frame, fpsText, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
 
-        // Wyświetlanie wyników
         cv::imshow("Oryginal (Wideo) z FPS", frame);
         cv::imshow("Maska Ruchu (z GPU, po erozji)", motionMaskGPU);
-        // Usunęliśmy okno 'Maska Ruchu (z GPU)'
 
         int key = cv::waitKey(1);
         if (key == 27) { // ESC
             break;
         }
-        // --- POPRAWIONA SEKCJA ZAPISYWANIA (3 KLATKI) ---
+        // ZAPISYWANIA (3 KLATKI) ---
         else if (key == 's' || key == 'S')
         {
-            // === USTAWIENIE ŚCIEŻKI ===
-            // Zmień "mnosel" na swoją nazwę użytkownika!
             std::string savePath = "C:\\Users\\mnosel\\Desktop\\";
 
-            // Nazwy plików dla wszystkich trzech obrazów
             std::string originalName = savePath + "klatka_" + std::to_string(frameCounter) + "_1_oryginal.png";
             std::string maskRawName = savePath + "klatka_" + std::to_string(frameCounter) + "_2_maska_z_szumem.png";
             std::string maskCleanName = savePath + "klatka_" + std::to_string(frameCounter) + "_3_maska_oczyszczona.png";
 
-            // Sprawdzamy, czy obraz oryginalny nie jest pusty
             if (frame.empty()) {
                 std::cerr << "BLAD: Proba zapisu pustej klatki!" << std::endl;
             }
             else
             {
-                // ---- NOWY KROK DLA WERSJI FULL-GPU ----
-                // Tworzymy tymczasowy kontener 'Mat' na CPU
+                // tymczasowy kontener 'Mat' na CPU
                 cv::Mat h_mask_raw(height, width, CV_8UC1);
-                // Kopiujemy "brudną" maskę (z szumami) z d_mask_raw (GPU) do h_mask_raw (CPU)
+                // Kopiowanie brudnej maski (z szumami) z d_mask_raw (GPU) do h_mask_raw (CPU)
                 checkCudaError(cudaMemcpy(h_mask_raw.data, d_mask_raw, dataSize, cudaMemcpyDeviceToHost), "Copy raw mask D2H for saving");
                 // -----------------------------------------
 
                 // Zapisujemy wszystkie trzy obrazy
                 bool success1 = cv::imwrite(originalName, frame);         // 1. Oryginał
-                bool success2 = cv::imwrite(maskRawName, h_mask_raw);   // 2. Maska "z szumami" (którą właśnie skopiowaliśmy)
-                bool success3 = cv::imwrite(maskCleanName, motionMaskGPU); // 3. Maska "oczyszczona" (jest już na CPU)
+                bool success2 = cv::imwrite(maskRawName, h_mask_raw);   // 2. Maska z szumami
+                bool success3 = cv::imwrite(maskCleanName, motionMaskGPU); // 3. Maska "oczyszczona" 
 
                 if (success1 && success2 && success3) {
                     std::cout << "ZAPISANO POMYSLNIE (3 pliki) do: " << savePath << std::endl;
@@ -244,12 +227,11 @@ int main()
         }
     }
 
-    // --- Sprzątanie ---
     std::cout << "Zamykanie..." << std::endl;
     cudaFree(d_current);
     cudaFree(d_prev);
-    cudaFree(d_mask_raw); // Sprzątamy nowy bufor
-    cudaFree(d_mask_eroded); // Sprzątamy nowy bufor
+    cudaFree(d_mask_raw); 
+    cudaFree(d_mask_eroded);
     cudaDeviceReset();
 
     cap.release();

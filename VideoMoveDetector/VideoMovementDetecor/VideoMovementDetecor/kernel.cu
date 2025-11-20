@@ -63,10 +63,7 @@ int main()
     std::vector<int> threadCounts = { 1, 2, 4, 8, 12 };
     const int FRAMES_TO_TEST = 150; // Ile klatek testować dla każdego przypadku
 
-    std::cout << "=================================================" << std::endl;
-    std::cout << "  AUTOMATYCZNY TEST WYDAJNOSCI (OpenMP vs Threads)" << std::endl;
-    std::cout << "=================================================" << std::endl;
-    std::cout << "Ladowanie wideo..." << std::endl;
+    std::cout << "TEST WYDAJNOSCI (OpenMP vs Threads)" << std::endl;
 
     cv::VideoCapture cap(videoPath);
     if (!cap.isOpened()) { std::cerr << "BLAD: Nie mozna otworzyc wideo!" << std::endl; return -1; }
@@ -137,9 +134,7 @@ int main()
     }
 
     // --- WYPISANIE WYNIKÓW ---
-    std::cout << "\n\n========================================" << std::endl;
-    std::cout << "       WYNIKI DO SPRAWOZDANIA           " << std::endl;
-    std::cout << "========================================" << std::endl;
+    std::cout << "       WYNIKI           " << std::endl;
     std::cout << std::left << std::setw(15) << "Liczba Watkow" << " | " << "FPS" << std::endl;
     std::cout << "----------------|-------" << std::endl;
 

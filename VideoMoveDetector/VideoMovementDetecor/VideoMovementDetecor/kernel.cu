@@ -15,9 +15,8 @@
 #include <iostream>
 #include <string> // Dla std::to_string
 
-// ======================================================================
+
 // KERNEL CUDA (bez zmian)
-// ======================================================================
 
 __global__ void diffAndThresholdKernel(unsigned char* mask,
     const unsigned char* current,
@@ -36,10 +35,8 @@ __global__ void diffAndThresholdKernel(unsigned char* mask,
     }
 }
 
-// ======================================================================
-// FUNKCJA OpenMP (bez zmian)
-// ======================================================================
 
+// FUNKCJA OpenMP 
 void manualErosionOpenMP(const cv::Mat& src, cv::Mat& dst)
 {
     dst.create(src.size(), src.type());
@@ -67,7 +64,7 @@ void manualErosionOpenMP(const cv::Mat& src, cv::Mat& dst)
     }
 }
 
-// Funkcja pomocnicza do sprawdzania błędów CUDA
+//sprawdzanie błędów CUDA
 void checkCudaError(cudaError_t status, const char* msg)
 {
     if (status != cudaSuccess) {
@@ -77,18 +74,10 @@ void checkCudaError(cudaError_t status, const char* msg)
     }
 }
 
-// ======================================================================
-// GŁÓWNA FUNKCJA PROGRAMU (ZMIANY)
-// ======================================================================
-
 int main()
 {
     const int MOTION_THRESHOLD = 25;
-
-    // --- Ustawienie rozdzielczości (DO TESTÓW FPS) ---
-    // Domyślne to zazwyczaj 640x480. Możesz spróbować zmienić na 1280x720.
-
-
+    
     cv::VideoCapture cap("C:\\Users\\mnosel\\Downloads\\test0.mp4");
     if (!cap.isOpened())
     {
@@ -98,8 +87,6 @@ int main()
     }
 
     // Ustawienie żądanej rozdzielczości kamery
-    
-
     std::cout << "Otwarto kamere. Rozpoczynanie przetwarzania..." << std::endl;
     std::cout << "Nacisnij 'ESC', aby zakonczyc." << std::endl;
     std::cout << "Nacisnij 's', aby zapisac klatki." << std::endl;
@@ -117,7 +104,7 @@ int main()
     size_t dataSize = 0;
     bool isFirstFrame = true;
 
-    // --- NOWOŚĆ: Pomiar FPS ---
+    //Pomiar FPS ---
     cv::TickMeter tm; // Obiekt do mierzenia czasu
     int frameCounter = 0; // Licznik klatek do zapisu
 
@@ -139,8 +126,6 @@ int main()
         {
             width = grayFrame.cols;
             height = grayFrame.rows;
-            // Sprawdź, czy kamera faktycznie ustawiła żądaną rozdzielczość
-            std::cout << "Rozdzielczosc przetwarzania: " << width << "x" << height << std::endl;
 
             dataSize = width * height * sizeof(unsigned char);
 
@@ -173,16 +158,15 @@ int main()
         manualErosionOpenMP(motionMaskGPU, motionMaskOMP);
 
         checkCudaError(cudaMemcpy(d_prev, d_current, dataSize, cudaMemcpyDeviceToDevice), "cudaMemcpy d_prev (D2D)");
-        // === KONIEC PRZETWARZANIA ===
 
-        tm.stop(); // <-- Zakończ pomiar czasu
+        tm.stop(); //Koniec pomiary czasu
 
-        // --- NOWOŚĆ: Wyświetlanie FPS ---
-        // Obliczamy FPS (używamy średniej kroczącej dla stabilności)
+        //Wyświetlanie FPS
+        // FPS (używamy średniej kroczącej dla stabilności)
         double fps = tm.getFPS();
         std::string fpsText = "FPS: " + std::to_string((int)fps);
 
-        // Rysuj tekst FPS na oryginalnej klatce
+        // FPS na  klatce
         cv::putText(frame,
             fpsText,
             cv::Point(10, 30), // Pozycja (X, Y)
@@ -191,41 +175,38 @@ int main()
             cv::Scalar(0, 255, 0), // Kolor (zielony)
             2); // Grubość
 
-        // Wyświetlanie wyników
+       
         cv::imshow("Oryginal (Kamera) z FPS", frame);
         cv::imshow("Maska Ruchu (z GPU)", motionMaskGPU);
         cv::imshow("Maska Ruchu po Morfologii (OpenMP)", motionMaskOMP);
 
-        // Obsługa klawiszy
+       
         int key = cv::waitKey(1);
         if (key == 27) { // ESC
             break;
         }
-        // --- NOWOŚĆ: Zapisywanie klatek ---
-        // --- POPRAWIONA SEKCJA ZAPISYWANIA KSTATEK ---
-        // --- POPRAWIONA SEKCJA ZAPISYWANIA (3 KLATKI) ---
+       
+        //ZAPISYWANIe (3 KLATKI)
         else if (key == 's' || key == 'S')
         {
-            // === USTAWIENIE ŚCIEŻKI ===
-            // Zmień "mnosel" na swoją nazwę użytkownika!
+            
             std::string savePath = "C:\\Users\\mnosel\\Desktop\\";
 
-            // Nazwy plików dla wszystkich trzech obrazów
-            // Dodajemy numerację (1, 2, 3), aby sortowały się poprawnie
+            
             std::string originalName = savePath + "klatka_" + std::to_string(frameCounter) + "_1_oryginal.png";
             std::string maskRawName = savePath + "klatka_" + std::to_string(frameCounter) + "_2_maska_z_szumem.png";
             std::string maskCleanName = savePath + "klatka_" + std::to_string(frameCounter) + "_3_maska_oczyszczona.png";
 
-            // Sprawdzamy, czy obrazy nie są puste
+            // Czy obrazy nie są puste
             if (frame.empty() || motionMaskGPU.empty() || motionMaskOMP.empty()) {
                 std::cerr << "BLAD: Proba zapisu pustej klatki!" << std::endl;
             }
             else
             {
-                // Zapisujemy wszystkie trzy obrazy
-                bool success1 = cv::imwrite(originalName, frame);         // Oryginał
-                bool success2 = cv::imwrite(maskRawName, motionMaskGPU); // Maska "z szumami"
-                bool success3 = cv::imwrite(maskCleanName, motionMaskOMP); // Maska "po oczyszczeniu"
+                // Save wszystkie trzy obrazy
+                bool success1 = cv::imwrite(originalName, frame);        
+                bool success2 = cv::imwrite(maskRawName, motionMaskGPU); 
+                bool success3 = cv::imwrite(maskCleanName, motionMaskOMP); 
 
                 if (success1 && success2 && success3) {
                     std::cout << "ZAPISANO POMYSLNIE (3 pliki) do: " << savePath << std::endl;

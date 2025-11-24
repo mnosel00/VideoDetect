@@ -103,7 +103,7 @@ int main() {
             framesForAverage = 0;
         }
 
-        // Wyświetlanie (możesz zakomentować, jeśli chcesz super dokładny wynik bez GUI)
+        // Wyświetlanie 
         cv::imshow("Full GPU", motionMaskGPU);
 
         int key = cv::waitKey(1);

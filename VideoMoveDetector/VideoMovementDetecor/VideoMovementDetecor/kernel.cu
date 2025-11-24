@@ -123,8 +123,8 @@ int main(int argc, char* argv[])
         if (framesAvg == 100) {
             tm.stop();
             double fps = 100.0 / tm.getTimeSec();
-            // Tylko proces 0 wypisuje, lub każdy (zależy jak wolisz).
-            // Tutaj każdy wypisuje, żebyś widział czy są równe.
+            // Tylko proces 0 wypisuje, lub każdy
+            // Tutaj każdy wypisuje, żeby sprawdzic czy są równe.
             std::cout << "[Proces " << rank << "] SREDNI FPS (MPI): " << fps << std::endl;
             tm.reset(); tm.start();
             framesAvg = 0;
